@@ -111,7 +111,7 @@ net = TnS_net(input_channel, input_length,output_channel, channel_sizes,kernel_s
 net(input).shape
 
 LR = 0.001
-epochs = 15
+epochs = 50
 b_size = 32
 
 criterion = nn.BCELoss()
