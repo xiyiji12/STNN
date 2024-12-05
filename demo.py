@@ -105,8 +105,11 @@ channel_sizes = [64,64,64,64]
 kernel_size = 7
 dropout = 0.5
 input = torch.randn(32, 64, 64)
+lstm_hidden_size = 32
+lstm_num_layers = 2
+net = TnS_net(input_channel, input_length,output_channel, channel_sizes,kernel_size,lstm_hidden_size,lstm_num_layers,dropout)
 
-net = TnS_net(input_channel, input_length,output_channel, channel_sizes,kernel_size,dropout)
+net(input).shape
 
 net(input).shape
 

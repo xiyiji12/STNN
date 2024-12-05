@@ -7,6 +7,8 @@ import torch.nn as nn
 from torch.nn.utils import weight_norm
 import random
 import numpy as np
+import torch.nn.functional
+import torch.nn.functional as F
 
 import einops
 
@@ -18,7 +20,6 @@ class Chomp1d(nn.Module):
 
     def forward(self, x):
         return x[:, :, :-self.chomp_size].contiguous()
-
 
 class SCA(nn.Module):
     def __init__(self, in_planes, kerenel_size, ratio=1):
@@ -38,39 +39,37 @@ class SCA(nn.Module):
 class EfficientAdditiveAttention(nn.Module):
 
     def __init__(self, in_dims, token_dim, num_heads=1):
-        # 输入的维度，表示输入数据每个token的特征数;token的维度，即每个token的最终特征维度;注意力头的数量，决定每个token会通过多少个独立的注意力机制进行计算。
         super().__init__()
-        #将输入数据映射到查询（query）和键（key）的表示空间。这两个层的输出维度是 token_dim * num_heads。
+
         self.to_query = nn.Linear(in_dims, token_dim * num_heads)
         self.to_key = nn.Linear(in_dims, token_dim * num_heads)
 
-        self.w_g = nn.Parameter(torch.randn(token_dim * num_heads, 1))#可学习的参数，计算查询权重。
-        self.scale_factor = token_dim ** -0.5 #缩放因子，用于调整查询权重的大小。
-        #是两个线性层，用于调整输出的维度，最终将输出转换为 token_dim 维度。
+        self.w_g = nn.Parameter(torch.randn(token_dim * num_heads, 1))
+        self.scale_factor = token_dim ** -0.5
         self.Proj = nn.Linear(token_dim * num_heads, token_dim * num_heads)
         self.final = nn.Linear(token_dim * num_heads, token_dim)
 
     def forward(self, x):
         query = self.to_query(x)
         key = self.to_key(x)
-        #得到查询和键，接着使用 normalize 对查询和键进行归一化，保证它们的范数为1，减少训练过程中的数值不稳定。
+
         query = torch.nn.functional.normalize(query, dim=-1)  # BxNxD
         key = torch.nn.functional.normalize(key, dim=-1)  # BxNxD
 
-        query_weight = query @ self.w_g  # BxNx1 (BxNxD @ Dx1)查询 query 和 w_g 的点积，生成每个token的注意力权重
-        A = query_weight * self.scale_factor  # BxNx1 将 query_weight 乘以缩放因子 scale_factor
+        query_weight = query @ self.w_g  # BxNx1 (BxNxD @ Dx1)
+        A = query_weight * self.scale_factor  # BxNx1
 
-        A = torch.nn.functional.normalize(A, dim=1)  # BxNx1 对 A 进行归一化。
+        A = torch.nn.functional.normalize(A, dim=1)  # BxNx1
 
-        G = torch.sum(A * query, dim=1)  # BxD 将 A 和 query 进行逐元素相乘，然后沿着 dim=1 进行求和，得到全局上下文表示 G
+        G = torch.sum(A * query, dim=1)  # BxD
 
         G = einops.repeat(
             G, "b d -> b repeat d", repeat=key.shape[1]
-        )  # BxNxD 将 G 重复 key.shape[1] 次，以便与每个token的键进行匹配
+        )  # BxNxD
 
-        out = self.Proj(G * key) + query  # BxNxD 通过 Proj 层进行线性变换
+        out = self.Proj(G * key) + query  # BxNxD
 
-        out = self.final(out)  # BxNxD 通过 final 层将输出的维度转换为 token_dim，得到最终的输出。
+        out = self.final(out)  # BxNxD
 
         return out
 
@@ -115,6 +114,8 @@ class Spatio_ConvNet(nn.Module):
     def __init__(self, n_inputs, n_channels):
         super(Spatio_ConvNet, self).__init__()
         self.relu = nn.ReLU()
+
+        self.cpca_block = CPCABlock(in_channels=n_inputs, out_channels=n_inputs, channelAttention_reduce=4)
 
         # 引入 SCA 模块
         self.sca = SCA(in_planes=n_channels, kerenel_size=3, ratio=2)
@@ -180,11 +181,6 @@ class Spatio_ConvNet(nn.Module):
         y = self.relu(y)
         return y
 
-        # y = self.net(x).squeeze(2)
-        # y = self.fc(y.view(-1, 16))
-        # y = self.relu(y)
-        # return y
-
 
 class Temporal_and_Spatio_Block(nn.Module):
     def __init__(self, n_inputs, input_length, n_outputs, kernel_size, stride, dilation, padding, dropout=0.2):
@@ -205,7 +201,6 @@ class Temporal_and_Spatio_Block(nn.Module):
         self.temporal_net = nn.Sequential(self.conv1, self.chomp1, self.relu1, self.dropout1, )
         # self.conv2, self.chomp2,self.relu2, self.dropout2,)
         self.spatio_net = Spatio_Block(n_inputs, input_length)
-        self.transformer = EfficientAdditiveAttention(in_dims=64, token_dim=64)
 
         self.relu = nn.ReLU()
         self.init_weights()
@@ -215,11 +210,10 @@ class Temporal_and_Spatio_Block(nn.Module):
         self.conv2.weight.data.normal_(0, 0.01)
 
     def forward(self, x):
-        y1 = self.temporal_net(x)#bs*64*64
-        y1 = self.transformer(y1)#bs*64*64
+        y1 = self.temporal_net(x)
 
         y2 = self.spatio_net(x)
-        return self.relu(x + y1 + y2)#bs*64*64
+        return self.relu(x + y1 + y2)
 
 
 class Temporal_and_Spatio_ConvNet(nn.Module):
@@ -235,12 +229,28 @@ class Temporal_and_Spatio_ConvNet(nn.Module):
             layers += [Temporal_and_Spatio_Block(in_channels, input_length, out_channels, kernel_size, stride=1,
                                                  dilation=dilation_size, padding=(kernel_size - 1) * dilation_size,
                                                  dropout=dropout)]
-
+        self.transformer = EfficientAdditiveAttention(in_dims=64, token_dim=64)
         self.temporal_and_spatio_network = nn.Sequential(*layers)
 
     def forward(self, x):
-        # x = self.transformer(x)
+        x = self.transformer(x)
         return self.temporal_and_spatio_network(x)
+
+
+class LSTM_Block(nn.Module):
+    def __init__(self, input_size, hidden_size, num_layers, output_size, dropout=0.2):
+        super(LSTM_Block, self).__init__()
+        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True, dropout=dropout)
+        self.fc = nn.Linear(hidden_size, output_size)
+
+    def forward(self, x):
+        # 输入形状：(batch_size, channels, sequence_length)
+        # LSTM 要求输入形状：(batch_size, sequence_length, input_size)
+        x = x.permute(0, 2, 1)  # 转换形状以适应 LSTM 输入
+        lstm_out, _ = self.lstm(x)
+        # 使用最后一个时间步的隐藏状态
+        out = self.fc(lstm_out[:, -1, :])
+        return out
 
 
 class TnS_net(nn.Module):
@@ -250,14 +260,18 @@ class TnS_net(nn.Module):
     # num_channels：定义各层卷积通道大小的列表。
     # kernel_size：卷积核的大小。
     # dropout：dropout 概率，用于防止过拟合。
-    def __init__(self, input_channel, input_length, output_channel, num_channels, kernel_size, dropout):
+    def __init__(self, input_channel, input_length, output_channel, num_channels, kernel_size, lstm_hidden_size,
+                 lstm_num_layers, dropout):
         super(TnS_net, self).__init__()
         self.TnS = Temporal_and_Spatio_ConvNet(input_channel, input_length, num_channels, kernel_size, dropout)
         self.Spatio_net = Spatio_ConvNet(input_channel, input_length)
+        self.lstm_block = LSTM_Block(input_channel, lstm_hidden_size, lstm_num_layers, output_channel, dropout)
         self.linear = nn.Linear(num_channels[-1], output_channel)
 
     def forward(self, x):
         y = self.TnS(x)  # input should have dimension (N, C, L)
         y1 = self.linear(y[:, :, -1])
         y2 = self.Spatio_net(x)
-        return torch.sigmoid(y1 + y2)
+        # LSTM 模块
+        y_lstm = self.lstm_block(x)
+        return torch.sigmoid(y1 + y2 + y_lstm)

@@ -1,7 +1,5 @@
 import scipy.io as sio
 from collections import defaultdict
-import numpy as np
-import random
 import scipy.signal
 from model import *
 
